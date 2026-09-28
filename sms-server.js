@@ -1,6 +1,6 @@
 // ============================================
 // 📱 বাকির খাতা - SMS Auto Server
-// Version: 6.0.0 (Advanced)
+// Version: 6.0.0 (Advanced - Fixed)
 // Features:
 //   ✅ Due SMS + Payment SMS
 //   ✅ SMS Parts Count (Bangla 70 chars)
@@ -15,12 +15,14 @@ const fs = require('fs');
 const path = require('path');
 
 // ============================================
-// 🔧 কনফিগারেশন
+// 🔧 কনফিগারেশন (Fixed URL & Interval)
 // ============================================
 const CONFIG = {
   API_KEY: process.env.API_KEY || 'uYhBuYuxGyqbipbEEjMu',
   SENDER_ID: process.env.SENDER_ID || '8809617634878',
   SMS_API_URL: 'http://bulksmsbd.net/api/smsapi',
+  BALANCE_API_URL: 'http://bulksmsbd.net/api/getBalanceApi', // ✅ নতুন যোগ করা
+  BALANCE_CHECK_INTERVAL: 5 * 60 * 1000, // ✅ ৫ মিনিট (মিলিসেকেন্ডে)
   SMS_RATE: 0.35,
   SERVER_START_TIME: Date.now()
 };
@@ -30,10 +32,8 @@ const CONFIG = {
 // ============================================
 let serviceAccount;
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  // Render-এর জন্য
   serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 } else {
-  // আপনার কম্পিউটারে লোকালি টেস্ট করার জন্য
   const folderPath = __dirname;
   const files = fs.readdirSync(folderPath);
   const jsonFile = files.find(file => file.includes('firebase-adminsdk') && file.endsWith('.json'));
@@ -46,17 +46,13 @@ admin.initializeApp({
 });
 
 const db = admin.database();
+
 // ============================================
 // 📊 SMS Parts Count (Bangla 70 chars/SMS)
 // ============================================
 function calculateSMSParts(message) {
   if (!message) return 0;
   const length = message.length;
-  
-  // Bangla (Unicode):
-  // 1-70 chars = 1 SMS
-  // 71+ chars = multipart (প্রতি part 67 chars, 7 chars header)
-  
   if (length <= 70) return 1;
   return 1 + Math.ceil((length - 70) / 67);
 }
@@ -122,7 +118,6 @@ async function fetchBulkSMSBalance() {
       const balance = parseFloat(response.data.balance) || 0;
       console.log('💰 BulkSMS BD Balance:', balance);
       
-      // Firebase এ সেভ করুন
       await db.ref('admin/bulksms_balance').set({
         balance: balance,
         lastChecked: admin.database.ServerValue.TIMESTAMP,
@@ -208,10 +203,8 @@ async function canSendSMS(userId, dataRef, smsParts = 1) {
 // ============================================
 async function processNewDue(userId, dueId, dueData, dataRef) {
   try {
-    // ১. Already SMS পাঠানো হয়েছে?
     if (dueData.sms_sent === true) return;
     
-    // ২. পুরনো entry?
     const dueCreatedTime = new Date(dueData.created_at || dueData.date).getTime();
     if (dueCreatedTime < CONFIG.SERVER_START_TIME - 60000) {
       await dataRef.update({ sms_sent: true, sms_skipped_reason: 'old_entry' });
@@ -222,7 +215,6 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
     console.log('   Customer:', dueData.customer_name);
     console.log('   Amount: ৳', dueData.amount);
     
-    // ৩. SMS Settings চেক
     const settingsSnapshot = await db.ref(`users/${userId}/sms_settings`).once('value');
     const smsSettings = settingsSnapshot.val();
     if (!smsSettings || !smsSettings.enabled || !smsSettings.autoSend) {
@@ -230,7 +222,6 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
       return;
     }
     
-    // ৪. কাস্টমার তথ্য খুঁজুন
     const dataSnapshot = await db.ref(`users/${userId}/data`).once('value');
     const allData = dataSnapshot.val();
     if (!allData) return;
@@ -250,7 +241,6 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
       return;
     }
     
-    // ৫. Balance Calculation
     let previousBalance = 0;
     Object.values(allData).forEach(item => {
       if (item.customer_id === dueData.customer_id) {
@@ -260,11 +250,9 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
     });
     previousBalance = previousBalance - dueData.amount;
     
-    // ৬. Shop Name
     const shopNameSnapshot = await db.ref(`users/${userId}/shop_name`).once('value');
     const shopName = shopNameSnapshot.val() || 'আমার দোকান';
     
-    // ৭. SMS Data তৈরি
     const smsData = {
       customerName: customerName,
       previousDue: Math.max(0, previousBalance).toLocaleString('bn-BD'),
@@ -274,23 +262,18 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
       shopName: shopName
     };
     
-    // ৮. Message তৈরি
     const template = smsSettings.template || 
       `নাম: {customerName}\nবাকি: ৳{newDue}\nমোট: ৳{totalDue}\n- {shopName}`;
     const message = buildSMSMessage(template, smsData);
     
-    // ৯. SMS Parts Count
     const smsParts = calculateSMSParts(message);
     console.log(`📊 Message: ${message.length} chars = ${smsParts} SMS`);
     
-    // ১০. Balance Check (Parts সহ)
     if (!(await canSendSMS(userId, dataRef, smsParts))) return;
     
-    // ১১. SMS পাঠান
     console.log('📱 Sending Due SMS to', customerMobile);
     const result = await sendSMS(customerMobile, message);
     
-    // ১২. Status Update
     await dataRef.update({
       sms_sent: true,
       sms_sent_at: admin.database.ServerValue.TIMESTAMP,
@@ -298,10 +281,8 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
       sms_parts: smsParts
     });
     
-    // ১৩. Balance কমান (শুধু সফল হলে)
     if (result.success) await deductSMSBalance(userId, smsParts);
     
-    // ১৪. History সেভ
     await db.ref(`users/${userId}/sms_history`).push({
       to: customerMobile,
       customerName: customerName,
@@ -325,10 +306,8 @@ async function processNewDue(userId, dueId, dueData, dataRef) {
 // ============================================
 async function processNewPayment(userId, paymentId, paymentData, dataRef) {
   try {
-    // ১. Already পাঠানো?
     if (paymentData.sms_sent === true) return;
     
-    // ২. পুরনো entry?
     const paymentCreatedTime = new Date(paymentData.created_at || paymentData.date).getTime();
     if (paymentCreatedTime < CONFIG.SERVER_START_TIME - 60000) {
       await dataRef.update({ sms_sent: true, sms_skipped_reason: 'old_entry' });
@@ -339,7 +318,6 @@ async function processNewPayment(userId, paymentId, paymentData, dataRef) {
     console.log('   Customer:', paymentData.customer_name);
     console.log('   Amount: ৳', paymentData.amount);
     
-    // ৩. SMS Settings চেক
     const settingsSnapshot = await db.ref(`users/${userId}/sms_settings`).once('value');
     const smsSettings = settingsSnapshot.val();
     if (!smsSettings || !smsSettings.enabled || !smsSettings.autoSend) {
@@ -347,7 +325,6 @@ async function processNewPayment(userId, paymentId, paymentData, dataRef) {
       return;
     }
     
-    // ৪. কাস্টমার তথ্য
     const dataSnapshot = await db.ref(`users/${userId}/data`).once('value');
     const allData = dataSnapshot.val();
     if (!allData) return;
@@ -367,7 +344,6 @@ async function processNewPayment(userId, paymentId, paymentData, dataRef) {
       return;
     }
     
-    // ৫. Balance Calculation
     let currentDue = 0;
     Object.values(allData).forEach(item => {
       if (item.customer_id === paymentData.customer_id) {
@@ -378,11 +354,9 @@ async function processNewPayment(userId, paymentId, paymentData, dataRef) {
     
     const previousDue = currentDue + paymentData.amount;
     
-    // ৬. Shop Name
     const shopNameSnapshot = await db.ref(`users/${userId}/shop_name`).once('value');
     const shopName = shopNameSnapshot.val() || 'আমার দোকান';
     
-    // ৭. SMS Data
     const smsData = {
       customerName: customerName,
       previousDue: previousDue > 0 ? previousDue.toLocaleString('bn-BD') : '০',
@@ -391,23 +365,18 @@ async function processNewPayment(userId, paymentId, paymentData, dataRef) {
       shopName: shopName
     };
     
-    // ৮. Message তৈরি (ছোট Template)
     const paymentTemplate = smsSettings.paymentTemplate || 
       `{customerName}\nপেমেন্ট: ৳{paidAmount}\nবাকি: ৳{currentDue}\n- {shopName}`;
     const message = buildSMSMessage(paymentTemplate, smsData);
     
-    // ৯. Parts Count
     const smsParts = calculateSMSParts(message);
     console.log(`📊 Message: ${message.length} chars = ${smsParts} SMS`);
     
-    // ১০. Balance Check
     if (!(await canSendSMS(userId, dataRef, smsParts))) return;
     
-    // ১১. Send SMS
     console.log('📱 Sending Payment SMS to', customerMobile);
     const result = await sendSMS(customerMobile, message);
     
-    // ১২. Status Update
     await dataRef.update({
       sms_sent: true,
       sms_sent_at: admin.database.ServerValue.TIMESTAMP,
@@ -415,10 +384,8 @@ async function processNewPayment(userId, paymentId, paymentData, dataRef) {
       sms_parts: smsParts
     });
     
-    // ১৩. Balance কমান
     if (result.success) await deductSMSBalance(userId, smsParts);
     
-    // ১৪. History
     await db.ref(`users/${userId}/sms_history`).push({
       to: customerMobile,
       customerName: customerName,
@@ -522,7 +489,7 @@ const server = http.createServer((req, res) => {
               <span class="badge" style="background:#f59e0b">Parts Counter</span>
             </p>
             <div class="info">
-              <strong>Port:</strong> 3000<br>
+              <strong>Port:</strong> ${PORT}<br>
               <strong>Status:</strong> Active<br>
               <strong>Started:</strong> ${new Date(CONFIG.SERVER_START_TIME).toLocaleString('bn-BD')}<br>
               <strong>Balance Check:</strong> Every 5 minutes
@@ -542,11 +509,9 @@ server.listen(PORT, () => {
   console.log(`🌐 Web Server: http://localhost:${PORT}`);
   console.log(`💊 Health Check: http://localhost:${PORT}/health\n`);
   
-  // 💰 Startup এ Balance চেক
   console.log('💰 Fetching BulkSMS BD Balance...');
   fetchBulkSMSBalance();
   
-  // 🔄 প্রতি ৫ মিনিটে Balance আপডেট
   setInterval(fetchBulkSMSBalance, CONFIG.BALANCE_CHECK_INTERVAL);
   console.log('✅ Balance Monitor: প্রতি ৫ মিনিটে আপডেট\n');
   
