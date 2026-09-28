@@ -18,36 +18,27 @@ const path = require('path');
 // 🔧 কনফিগারেশন
 // ============================================
 const CONFIG = {
-  API_KEY: 'uYhBuYuxGyqbipbEEjMu',
-  SENDER_ID: '8809617634878',
+  API_KEY: process.env.API_KEY || 'uYhBuYuxGyqbipbEEjMu',
+  SENDER_ID: process.env.SENDER_ID || '8809617634878',
   SMS_API_URL: 'http://bulksmsbd.net/api/smsapi',
-  BALANCE_API_URL: 'http://bulksmsbd.net/api/getBalanceApi',
   SMS_RATE: 0.35,
-  SERVER_START_TIME: Date.now(),
-  BALANCE_CHECK_INTERVAL: 5 * 60 * 1000  // ৫ মিনিট
+  SERVER_START_TIME: Date.now()
 };
 
 // ============================================
-// 📁 Service Account Load
+// 📁 Service Account Load (Render + Local Support)
 // ============================================
-function getServiceAccountPath() {
+let serviceAccount;
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  // Render-এর জন্য
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+} else {
+  // আপনার কম্পিউটারে লোকালি টেস্ট করার জন্য
   const folderPath = __dirname;
   const files = fs.readdirSync(folderPath);
-  const jsonFile = files.find(file => 
-    file.includes('firebase-adminsdk') && file.endsWith('.json')
-  );
-  if (!jsonFile) {
-    console.error('❌ Service Account JSON file not found!');
-    process.exit(1);
-  }
-  console.log('✅ Service Account:', jsonFile);
-  return path.join(folderPath, jsonFile);
+  const jsonFile = files.find(file => file.includes('firebase-adminsdk') && file.endsWith('.json'));
+  serviceAccount = require(path.join(folderPath, jsonFile));
 }
-
-// ============================================
-// 🔥 Firebase Initialize
-// ============================================
-const serviceAccount = require(getServiceAccountPath());
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -55,7 +46,6 @@ admin.initializeApp({
 });
 
 const db = admin.database();
-
 // ============================================
 // 📊 SMS Parts Count (Bangla 70 chars/SMS)
 // ============================================
@@ -495,7 +485,7 @@ usersRef.on('child_added', (userSnapshot) => {
 // 🌐 Web Server (Health Check)
 // ============================================
 const http = require('http');
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
