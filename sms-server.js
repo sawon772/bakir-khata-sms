@@ -23,27 +23,44 @@ const CONFIG = {
 };
 
 // ============================================
-// 🔥 FIREBASE INIT
+// 🔥 FIREBASE INIT (Environment Variable এর মাধ্যমে)
 // ============================================
-function getServiceAccountPath() {
-  const folder = __dirname;
-  const jsonFile = fs.readdirSync(folder).find(f =>
-    f.includes('firebase-adminsdk') && f.endsWith('.json')
-  );
-  if (!jsonFile) {
-    console.error('❌ Service Account JSON not found!');
+let serviceAccount;
+
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  // Render-এ Environment Variable থেকে JSON পার্স করা
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log('✅ Firebase Service Account loaded from Environment Variable');
+  } catch (e) {
+    console.error('❌ Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', e.message);
     process.exit(1);
   }
-  return path.join(folder, jsonFile);
+} else {
+  // লোকাল মেশিনে ফাইল থেকে পড়ার ব্যাকআপ (যদি আপনি লোকালে টেস্ট করতে চান)
+  try {
+    const folder = __dirname;
+    const jsonFile = fs.readdirSync(folder).find(f =>
+      f.includes('firebase-adminsdk') && f.endsWith('.json')
+    );
+    if (jsonFile) {
+      serviceAccount = require(path.join(folder, jsonFile));
+      console.log('✅ Firebase Service Account loaded from local file');
+    } else {
+      console.error('❌ Service Account JSON not found! Please set FIREBASE_SERVICE_ACCOUNT env variable.');
+      process.exit(1);
+    }
+  } catch (e) {
+    console.error('❌ Error loading Service Account:', e.message);
+    process.exit(1);
+  }
 }
 
-const serviceAccount = require(getServiceAccountPath());
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   databaseURL: 'https://bakir-khara-default-rtdb.asia-southeast1.firebasedatabase.app'
 });
 const db = admin.database();
-
 // ============================================
 // 📊 UTILITIES
 // ============================================
