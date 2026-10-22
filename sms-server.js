@@ -90,50 +90,58 @@ function cleanPhone(phone) {
 }
 
 // ============================================
-// 🚀 CORE PUSH NOTIFICATION SENDER
+// 🚀 MULTI-DEVICE PUSH NOTIFICATION SENDER
 // ============================================
 async function sendPushNotification(userId, title, body, extraData = {}) {
   try {
-    const snap = await db.ref(`users/${userId}/fcm_token`).once('value');
-    const fcmToken = snap.val();
+    // আগের fcm_token এর বদলে fcm_tokens (লিস্ট) চেক করছি
+    const snap = await db.ref(`users/${userId}/fcm_tokens`).once('value');
+    const tokensObj = snap.val();
 
-    if (!fcmToken) {
-      console.log(`⚠️ No FCM token found for user: ${userId}`);
+    if (!tokensObj) {
+      console.log(`⚠️ No FCM tokens found for user: ${userId}`);
       return false;
     }
 
+    // অবজেক্টের সব টোকেনের একটি অ্যারে (Array) তৈরি করছি
+    const tokens = Object.keys(tokensObj);
+
     const message = {
-      notification: {
-        title: title,
-        body: body,
-        // ❌ icon এখান থেকে সরিয়ে দেওয়া হয়েছে
-      },
-      data: {
-        ...extraData,
-        click_action: '/products.html'
-      },
-      // ✅ webpush কনফিগারেশনে icon যুক্ত করা হলো
+      notification: { title: title, body: body },
+      data: { ...extraData, click_action: '/products.html' },
       webpush: {
         notification: {
-          icon: 'https://bakirkhata.pages.dev/icon-192.png' // আপনার অ্যাপের সম্পূর্ণ আইকন URL দিন
+          icon: 'https://bakirkhata.pages.dev/icon-192.png'
         },
-        fcmOptions: {
-          link: 'https://bakirkhata.pages.dev/products.html' // ক্লিক করলে যেখানে যাবে
-        }
+        fcmOptions: { link: 'https://bakirkhata.pages.dev/products.html' }
       },
-      token: fcmToken
+      tokens: tokens // sendMulticast এর জন্য tokens অ্যারে দিতে হয়
     };
 
-    const response = await admin.messaging().send(message);
-    console.log(`🔔 Push Notification Sent to ${userId}:`, response);
-    return true;
+    // sendMulticast ব্যবহার করে একসাথে সব ফোনে পাঠানো হচ্ছে
+    const response = await admin.messaging().sendMulticast(message);
+    console.log(`🔔 Push Notification Sent! Success: ${response.successCount}, Failure: ${response.failureCount}`);
+
+    // যদি কোনো ফোনের টোকেন ইনভ্যালিড (পুরনো) হয়ে যায়, তবে সেটা ডাটাবেস থেকে মুছে ফেলবো
+    if (response.failureCount > 0) {
+      const failedTokens = [];
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          failedTokens.push(tokens[idx]);
+        }
+      });
+      
+      // ইনভ্যালিড টোকেনগুলো ডাটাবেস থেকে ডিলিট করা
+      for (const token of failedTokens) {
+         await db.ref(`users/${userId}/fcm_tokens/${token}`).remove();
+         console.log(`🗑️ Removed invalid token: ${token}`);
+      }
+    }
+
+    return response.successCount > 0;
 
   } catch (error) {
     console.error(`❌ Push Notification Error for ${userId}:`, error.message);
-    if (error.code === 'messaging/registration-token-not-registered') {
-      await db.ref(`users/${userId}/fcm_token`).remove();
-      console.log(`🗑️ Removed invalid FCM token for user: ${userId}`);
-    }
     return false;
   }
 }
