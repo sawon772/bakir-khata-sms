@@ -94,7 +94,6 @@ function cleanPhone(phone) {
 // ============================================
 async function sendPushNotification(userId, title, body, extraData = {}) {
   try {
-    // ডাটাবেস থেকে ইউজারের FCM টোকেন নিন
     const snap = await db.ref(`users/${userId}/fcm_token`).once('value');
     const fcmToken = snap.val();
 
@@ -107,11 +106,20 @@ async function sendPushNotification(userId, title, body, extraData = {}) {
       notification: {
         title: title,
         body: body,
-        icon: '/icon-192.png' // আপনার অ্যাপের লোগো
+        // ❌ icon এখান থেকে সরিয়ে দেওয়া হয়েছে
       },
       data: {
         ...extraData,
-        click_action: '/products.html' // ক্লিক করলে কোথায় নিয়ে যাবে
+        click_action: '/products.html'
+      },
+      // ✅ webpush কনফিগারেশনে icon যুক্ত করা হলো
+      webpush: {
+        notification: {
+          icon: 'https://bakirkhata.pages.dev/icon-192.png' // আপনার অ্যাপের সম্পূর্ণ আইকন URL দিন
+        },
+        fcmOptions: {
+          link: 'https://bakirkhata.pages.dev/products.html' // ক্লিক করলে যেখানে যাবে
+        }
       },
       token: fcmToken
     };
@@ -122,7 +130,6 @@ async function sendPushNotification(userId, title, body, extraData = {}) {
 
   } catch (error) {
     console.error(`❌ Push Notification Error for ${userId}:`, error.message);
-    // যদি টোকেন ইনভ্যালিড হয়, তবে ডাটাবেস থেকে মুছে ফেলা ভালো
     if (error.code === 'messaging/registration-token-not-registered') {
       await db.ref(`users/${userId}/fcm_token`).remove();
       console.log(`🗑️ Removed invalid FCM token for user: ${userId}`);
