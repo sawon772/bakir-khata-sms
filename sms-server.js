@@ -90,11 +90,10 @@ function cleanPhone(phone) {
 }
 
 // ============================================
-// 🚀 MULTI-DEVICE PUSH NOTIFICATION SENDER
+// 🚀 MULTI-DEVICE PUSH NOTIFICATION SENDER (Fixed 404 Error)
 // ============================================
 async function sendPushNotification(userId, title, body, extraData = {}) {
   try {
-    // আগের fcm_token এর বদলে fcm_tokens (লিস্ট) চেক করছি
     const snap = await db.ref(`users/${userId}/fcm_tokens`).once('value');
     const tokensObj = snap.val();
 
@@ -103,45 +102,51 @@ async function sendPushNotification(userId, title, body, extraData = {}) {
       return false;
     }
 
-    // অবজেক্টের সব টোকেনের একটি অ্যারে (Array) তৈরি করছি
+    // সব টোকেনের একটি অ্যারে তৈরি করছি
     const tokens = Object.keys(tokensObj);
+    let successCount = 0;
+    let failureCount = 0;
 
-    const message = {
-      notification: { title: title, body: body },
-      data: { ...extraData, click_action: '/products.html' },
-      webpush: {
-        notification: {
-          icon: 'https://bakirkhata.pages.dev/icon-192.png'
+    // 🔄 লুপ চালিয়ে প্রতিটি টোকেনে আলাদা করে মেসেজ পাঠাচ্ছি (sendMulticast এর বদলে)
+    for (const token of tokens) {
+      const message = {
+        notification: { title: title, body: body },
+        data: { ...extraData },
+        webpush: {
+          notification: {
+            icon: 'https://bakirkhata.pages.dev/icon-192.png'
+          },
+          // ✅ এখানে লিংকটি রিলেটিভ (Relative) দিতে হবে, সম্পূর্ণ ডোমেইন দিলে এরর হতে পারে
+          fcmOptions: { link: '/products.html' } 
         },
-        fcmOptions: { link: 'https://bakirkhata.pages.dev/products.html' }
-      },
-      tokens: tokens // sendMulticast এর জন্য tokens অ্যারে দিতে হয়
-    };
+        token: token // এখানে একটি নির্দিষ্ট টোকেন দিচ্ছি
+      };
 
-    // sendMulticast ব্যবহার করে একসাথে সব ফোনে পাঠানো হচ্ছে
-    const response = await admin.messaging().sendMulticast(message);
-    console.log(`🔔 Push Notification Sent! Success: ${response.successCount}, Failure: ${response.failureCount}`);
-
-    // যদি কোনো ফোনের টোকেন ইনভ্যালিড (পুরনো) হয়ে যায়, তবে সেটা ডাটাবেস থেকে মুছে ফেলবো
-    if (response.failureCount > 0) {
-      const failedTokens = [];
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          failedTokens.push(tokens[idx]);
+      try {
+        const response = await admin.messaging().send(message);
+        console.log(`🔔 Notification Sent to token: ${token.slice(0, 10)}...`);
+        successCount++;
+      } catch (err) {
+        console.log(`❌ Failed for token: ${token.slice(0, 10)}... Error: ${err.message}`);
+        failureCount++;
+        
+        // 🗑️ যদি টোকেন ইনভ্যালিড বা এক্সপায়ার্ড হয়ে যায়, তবে ডাটাবেস থেকে মুছে ফেলবো
+        if (
+          err.code === 'messaging/registration-token-not-registered' ||
+          err.code === 'messaging/invalid-argument' ||
+          err.code === 'messaging/unknown-error' // 404 এরর কখনো unknown-error হিসেবে আসে
+        ) {
+          await db.ref(`users/${userId}/fcm_tokens/${token}`).remove();
+          console.log(`🗑️ Removed invalid token: ${token.slice(0, 10)}...`);
         }
-      });
-      
-      // ইনভ্যালিড টোকেনগুলো ডাটাবেস থেকে ডিলিট করা
-      for (const token of failedTokens) {
-         await db.ref(`users/${userId}/fcm_tokens/${token}`).remove();
-         console.log(`🗑️ Removed invalid token: ${token}`);
       }
     }
 
-    return response.successCount > 0;
+    console.log(`📊 Push Summary for ${userId}: Success: ${successCount}, Failed: ${failureCount}`);
+    return successCount > 0;
 
   } catch (error) {
-    console.error(`❌ Push Notification Error for ${userId}:`, error.message);
+    console.error(`❌ Push Notification Critical Error for ${userId}:`, error.message);
     return false;
   }
 }
