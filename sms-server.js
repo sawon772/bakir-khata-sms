@@ -504,13 +504,22 @@ usersRef.on('child_added', (userSnap) => {
 });
 
 // ২. নতুন অর্ডার লিসেনার (পুশ নোটিফিকেশনের জন্য)
+console.log('👀 Watching orders node for new orders...'); // নতুন লাইন
 db.ref('orders').on('child_added', async (snap) => {
+  console.log('🔥 Order event fired! Checking data...'); // নতুন লাইন
   const orderData = snap.val();
+  
   if (orderData) {
+    console.log('📦 Order Data Received:', orderData); // নতুন লাইন
+    if (!orderData.owner_uid) {
+       console.log('⚠️ Order rejected: owner_uid is missing!');
+       return;
+    }
     await processOrderNotification(snap.key, orderData);
+  } else {
+    console.log('⚠️ Order data is empty.');
   }
 });
-
 
 // ============================================
 // 🌐 HEALTH SERVER
