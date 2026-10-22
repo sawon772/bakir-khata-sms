@@ -1,6 +1,6 @@
 // ============================================
-// 📱 বাকির খাতা - SMS Server v7.0.0 (Modular)
-// Supports: Due, Payment, Fund-Receive, Fund-Payment, Manual
+// 📱 বাকির খাতা - Master Server v8.0.0 (Modular + Push Notification)
+// Supports: Due, Payment, Fund-Receive, Fund-Payment, Manual SMS & Push Notification
 // ============================================
 
 const admin = require('firebase-admin');
@@ -18,7 +18,7 @@ const CONFIG = {
   SMS_API_URL: 'http://bulksmsbd.net/api/smsapi',
   BALANCE_API_URL: 'http://bulksmsbd.net/api/getBalanceApi',
   SERVER_START_TIME: Date.now(),
-  BALANCE_CHECK_INTERVAL: 5 * 60 * 1000,
+  BALANCE_CHECK_INTERVAL: 5 * 60 * 1000, // ৫ মিনিট
   PORT: process.env.PORT || 3000
 };
 
@@ -28,7 +28,6 @@ const CONFIG = {
 let serviceAccount;
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  // Render-এ Environment Variable থেকে JSON পার্স করা
   try {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     console.log('✅ Firebase Service Account loaded from Environment Variable');
@@ -37,7 +36,6 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     process.exit(1);
   }
 } else {
-  // লোকাল মেশিনে ফাইল থেকে পড়ার ব্যাকআপ (যদি আপনি লোকালে টেস্ট করতে চান)
   try {
     const folder = __dirname;
     const jsonFile = fs.readdirSync(folder).find(f =>
@@ -61,8 +59,9 @@ admin.initializeApp({
   databaseURL: 'https://bakir-khara-default-rtdb.asia-southeast1.firebasedatabase.app'
 });
 const db = admin.database();
+
 // ============================================
-// 📊 UTILITIES
+// 📊 UTILITIES (সাধারণ হেল্পার ফাংশন)
 // ============================================
 function calculateSMSParts(msg) {
   if (!msg) return 0;
@@ -88,6 +87,48 @@ function cleanPhone(phone) {
   let n = String(phone || '').replace(/[^0-9]/g, '');
   if (!n.startsWith('880') && n.startsWith('0')) n = '88' + n;
   return n;
+}
+
+// ============================================
+// 🚀 CORE PUSH NOTIFICATION SENDER
+// ============================================
+async function sendPushNotification(userId, title, body, extraData = {}) {
+  try {
+    // ডাটাবেস থেকে ইউজারের FCM টোকেন নিন
+    const snap = await db.ref(`users/${userId}/fcm_token`).once('value');
+    const fcmToken = snap.val();
+
+    if (!fcmToken) {
+      console.log(`⚠️ No FCM token found for user: ${userId}`);
+      return false;
+    }
+
+    const message = {
+      notification: {
+        title: title,
+        body: body,
+        icon: '/icon-192.png' // আপনার অ্যাপের লোগো
+      },
+      data: {
+        ...extraData,
+        click_action: '/products.html' // ক্লিক করলে কোথায় নিয়ে যাবে
+      },
+      token: fcmToken
+    };
+
+    const response = await admin.messaging().send(message);
+    console.log(`🔔 Push Notification Sent to ${userId}:`, response);
+    return true;
+
+  } catch (error) {
+    console.error(`❌ Push Notification Error for ${userId}:`, error.message);
+    // যদি টোকেন ইনভ্যালিড হয়, তবে ডাটাবেস থেকে মুছে ফেলা ভালো
+    if (error.code === 'messaging/registration-token-not-registered') {
+      await db.ref(`users/${userId}/fcm_token`).remove();
+      console.log(`🗑️ Removed invalid FCM token for user: ${userId}`);
+    }
+    return false;
+  }
 }
 
 // ============================================
@@ -162,7 +203,7 @@ async function fetchBulkSMSBalance() {
 }
 
 // ============================================
-// 🧩 SHARED HELPERS
+// 🧩 SHARED SMS HELPERS
 // ============================================
 async function canSendSMS(userId, dataRef, parts) {
   const snap = await db.ref(`users/${userId}/sms_balance/balance`).once('value');
@@ -184,13 +225,12 @@ async function logSMSHistory(userId, payload) {
 }
 
 // ============================================
-// 🎯 MASTER PROCESSOR
+// 📱 MASTER SMS PROCESSOR
 // ============================================
 async function processSMS(userId, dataId, data, dataRef, cfg) {
   try {
     if (data.sms_sent === true) return;
 
-    // পুরনো entry skip
     const createdTime = new Date(data.created_at || data.date).getTime();
     if (createdTime < CONFIG.SERVER_START_TIME - 60000) {
       await dataRef.update({ sms_sent: true, sms_skipped_reason: 'old_entry' });
@@ -199,7 +239,6 @@ async function processSMS(userId, dataId, data, dataRef, cfg) {
 
     console.log(`\n🔔 New ${cfg.type} → ${data.customer_name || data.provider_name}`);
 
-    // Settings
     const sSnap = await db.ref(`users/${userId}/sms_settings`).once('value');
     const s = sSnap.val() || {};
 
@@ -210,7 +249,6 @@ async function processSMS(userId, dataId, data, dataRef, cfg) {
       return;
     }
 
-    // Data source
     const dSnap = await db.ref(`users/${userId}/data`).once('value');
     const allData = dSnap.val() || {};
     const list = Object.values(allData);
@@ -242,7 +280,6 @@ async function processSMS(userId, dataId, data, dataRef, cfg) {
     const shopSnap = await db.ref(`users/${userId}/shop_name`).once('value');
     const shopName = shopSnap.val() || 'আমার দোকান';
 
-    // Build vars
     const vars = await cfg.dataBuilder({ allData: list, data, customerName: name, shopName });
     const template = s[cfg.templateKey] || cfg.defaultTemplate;
     const message = buildMessage(template, vars);
@@ -284,14 +321,11 @@ async function processSMS(userId, dataId, data, dataRef, cfg) {
 }
 
 // ============================================
-// 🎯 SMS CONFIGS (ভবিষ্যতে নতুন টাইপ যোগ করা সহজ)
+// 🎯 SMS CONFIGS
 // ============================================
 const SMS_CONFIGS = {
-  'due': {
-    type: 'due',
-    party: 'customer',
-    templateKey: 'template',
-    settingsKey: 'sendOnDue',
+  'due': { /* ... আপনার আগের Due SMS কনফিগ ... */ 
+    type: 'due', party: 'customer', templateKey: 'template', settingsKey: 'sendOnDue',
     defaultTemplate: `নাম: {customerName}\nবাকি: ৳{newDue}\nমোট: ৳{totalDue}\n- {shopName}`,
     dataBuilder: async ({ allData, data, customerName, shopName }) => {
       let prev = 0;
@@ -302,21 +336,11 @@ const SMS_CONFIGS = {
         }
       });
       const previous = prev - (data.amount || 0);
-      return {
-        customerName,
-        previousDue: toBn(Math.max(0, previous)),
-        newDue: toBn(data.amount),
-        totalDue: toBn(Math.max(0, previous + data.amount)),
-        dueDate: data.due_date || data.date || 'শীঘ্রই',
-        shopName
-      };
+      return { customerName, previousDue: toBn(Math.max(0, previous)), newDue: toBn(data.amount), totalDue: toBn(Math.max(0, previous + data.amount)), dueDate: data.due_date || data.date || 'শীঘ্রই', shopName };
     }
   },
-  'payment': {
-    type: 'payment',
-    party: 'customer',
-    templateKey: 'paymentTemplate',
-    settingsKey: 'sendOnPayment',
+  'payment': { /* ... আপনার আগের Payment SMS কনফিগ ... */ 
+    type: 'payment', party: 'customer', templateKey: 'paymentTemplate', settingsKey: 'sendOnPayment',
     defaultTemplate: `{customerName}\nপেমেন্ট: ৳{paidAmount}\nবাকি: ৳{currentDue}\n- {shopName}`,
     dataBuilder: async ({ allData, data, customerName, shopName }) => {
       let cur = 0;
@@ -326,21 +350,11 @@ const SMS_CONFIGS = {
           if (it.type === 'payment') cur -= it.amount || 0;
         }
       });
-      const previous = cur + (data.amount || 0);
-      return {
-        customerName,
-        previousDue: toBn(Math.max(0, previous)),
-        paidAmount: toBn(data.amount),
-        currentDue: toBn(Math.max(0, cur)),
-        shopName
-      };
+      return { customerName, previousDue: toBn(Math.max(0, cur + (data.amount || 0))), paidAmount: toBn(data.amount), currentDue: toBn(Math.max(0, cur)), shopName };
     }
   },
-  'fund-receive': {
-    type: 'fund-receive',
-    party: 'provider',
-    templateKey: 'fundReceiveTemplate',
-    settingsKey: 'sendOnFundReceive',
+  'fund-receive': { /* ... আপনার আগের Fund Receive SMS কনফিগ ... */ 
+    type: 'fund-receive', party: 'provider', templateKey: 'fundReceiveTemplate', settingsKey: 'sendOnFundReceive',
     defaultTemplate: `{providerName}\nফান্ড গ্রহণ: ৳{amount}\nমোট ফান্ড: ৳{balance}\n- {shopName}`,
     dataBuilder: async ({ allData, data, customerName, shopName }) => {
       let balance = 0;
@@ -350,20 +364,11 @@ const SMS_CONFIGS = {
           if (it.type === 'fund-payment') balance -= it.amount || 0;
         }
       });
-      return {
-        providerName: customerName,
-        amount: toBn(data.amount),
-        balance: toBn(Math.max(0, balance)),
-        date: data.date || '',
-        shopName
-      };
+      return { providerName: customerName, amount: toBn(data.amount), balance: toBn(Math.max(0, balance)), date: data.date || '', shopName };
     }
   },
-  'fund-payment': {
-    type: 'fund-payment',
-    party: 'provider',
-    templateKey: 'fundPaymentTemplate',
-    settingsKey: 'sendOnFundPayment',
+  'fund-payment': { /* ... আপনার আগের Fund Payment SMS কনফিগ ... */ 
+    type: 'fund-payment', party: 'provider', templateKey: 'fundPaymentTemplate', settingsKey: 'sendOnFundPayment',
     defaultTemplate: `{providerName}\nফান্ড পরিশোধ: ৳{amount}\nঅবশিষ্ট: ৳{balance}\n- {shopName}`,
     dataBuilder: async ({ allData, data, customerName, shopName }) => {
       let balance = 0;
@@ -373,19 +378,13 @@ const SMS_CONFIGS = {
           if (it.type === 'fund-payment') balance -= it.amount || 0;
         }
       });
-      return {
-        providerName: customerName,
-        amount: toBn(data.amount),
-        balance: toBn(Math.max(0, balance)),
-        date: data.date || '',
-        shopName
-      };
+      return { providerName: customerName, amount: toBn(data.amount), balance: toBn(Math.max(0, balance)), date: data.date || '', shopName };
     }
   }
 };
 
 // ============================================
-// 📱 MANUAL SMS QUEUE
+// 📱 MANUAL SMS QUEUE PROCESSOR
 // ============================================
 async function processManualSMS(userId, queueId, q, qRef) {
   try {
@@ -431,14 +430,8 @@ async function processManualSMS(userId, queueId, q, qRef) {
     });
 
     await logSMSHistory(userId, {
-      to: clean,
-      customerName: q.customerName || '',
-      customerId: q.customerId || '',
-      message: q.message,
-      status: result.success ? 'sent' : 'failed',
-      type: 'manual',
-      smsParts: parts,
-      timestamp: admin.database.ServerValue.TIMESTAMP
+      to: clean, customerName: q.customerName || '', customerId: q.customerId || '', message: q.message,
+      status: result.success ? 'sent' : 'failed', type: 'manual', smsParts: parts, timestamp: admin.database.ServerValue.TIMESTAMP
     });
 
     console.log(result.success ? '✅ Manual SMS Sent' : '❌ Manual SMS Failed');
@@ -449,15 +442,51 @@ async function processManualSMS(userId, queueId, q, qRef) {
 }
 
 // ============================================
-// 👀 LISTENERS
+// 🔔 NEW ORDER PUSH NOTIFICATION
+// ============================================
+async function processOrderNotification(orderId, orderData) {
+  try {
+    if (orderData.notification_sent === true) return;
+    
+    // যদি অর্ডার বাতিল করা থাকে, নোটিফিকেশন যাবে না
+    if (orderData.status === 'cancelled') return;
+
+    const ownerUid = orderData.owner_uid;
+    if (!ownerUid) return;
+
+    console.log(`\n🛒 New Order (#${orderId.slice(-6)}) for user: ${ownerUid}`);
+
+    const title = '🛒 নতুন অর্ডার এসেছে!';
+    const body = `${orderData.customer_name || 'কাস্টমার'} — ৳${toBn(orderData.total_price)} (${orderData.quantity}টি)`;
+
+    const success = await sendPushNotification(ownerUid, title, body, {
+      orderId: orderId,
+      type: 'new_order'
+    });
+
+    if (success) {
+      await db.ref(`orders/${orderId}`).update({
+        notification_sent: true,
+        notification_sent_at: admin.database.ServerValue.TIMESTAMP
+      });
+    }
+
+  } catch (e) {
+    console.error(`❌ Order Notification Error (${orderId}):`, e.message);
+  }
+}
+
+// ============================================
+// 👀 MASTER LISTENERS (এখানেই সব লিসেনার সেট হবে)
 // ============================================
 const usersRef = db.ref('users');
 
+// ১. ইউজার রেজিস্ট্রেশন লিসেনার
 usersRef.on('child_added', (userSnap) => {
   const userId = userSnap.key;
-  console.log('👤 Watching:', userId);
+  console.log('👤 Watching user:', userId);
 
-  // Transaction data (due, payment, fund-receive, fund-payment)
+  // ট্রানজেকশন ডাটা (Due, Payment, Fund)
   db.ref(`users/${userId}/data`).on('child_added', async (snap) => {
     const d = snap.val();
     if (!d || !d.type) return;
@@ -465,7 +494,7 @@ usersRef.on('child_added', (userSnap) => {
     if (cfg) await processSMS(userId, snap.key, d, snap.ref, cfg);
   });
 
-  // Manual SMS Queue
+  // ম্যানুয়াল SMS কিউ
   db.ref(`users/${userId}/sms_queue`).on('child_added', async (snap) => {
     const q = snap.val();
     if (q && (!q.status || q.status === 'pending')) {
@@ -473,6 +502,15 @@ usersRef.on('child_added', (userSnap) => {
     }
   });
 });
+
+// ২. নতুন অর্ডার লিসেনার (পুশ নোটিফিকেশনের জন্য)
+db.ref('orders').on('child_added', async (snap) => {
+  const orderData = snap.val();
+  if (orderData) {
+    await processOrderNotification(snap.key, orderData);
+  }
+});
+
 
 // ============================================
 // 🌐 HEALTH SERVER
@@ -482,24 +520,24 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'running',
-      version: '7.0.0',
-      features: Object.keys(SMS_CONFIGS).concat(['manual']),
+      version: '8.0.0',
+      features: Object.keys(SMS_CONFIGS).concat(['manual', 'push_notification']),
       uptime: Math.floor((Date.now() - CONFIG.SERVER_START_TIME) / 1000)
     }));
   } else {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`
-      <html><head><title>SMS Server v7</title>
+      <html><head><title>Master Server v8</title>
       <style>body{font-family:sans-serif;background:#f0fdf4;padding:40px;text-align:center}
       h1{color:#059669}ul{list-style:none;padding:0}li{background:white;margin:8px auto;padding:12px;
       border-radius:8px;max-width:300px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}</style></head>
       <body>
-        <h1>📱 SMS Server v7.0.0 ✅</h1>
-        <p>Modular | Auto + Manual SMS</p>
+        <h1>📱 Master Server v8.0.0 ✅</h1>
+        <p>SMS + Push Notification</p>
         <ul>
-          <li>📝 Due</li><li>💰 Payment</li>
-          <li>💵 Fund Receive</li><li>💸 Fund Payment</li>
-          <li>📱 Manual SMS</li>
+          <li>📝 Due SMS</li><li>💰 Payment SMS</li>
+          <li>💵 Fund SMS</li><li>📱 Manual SMS</li>
+          <li style="background:#dcfce7; font-weight:bold;">🔔 Push Notification</li>
         </ul>
       </body></html>
     `);
@@ -508,7 +546,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(CONFIG.PORT, async () => {
   console.log(`\n🌐 Server: http://localhost:${CONFIG.PORT}`);
-  console.log(`📱 SMS Server v7.0.0 Ready\n`);
+  console.log(`🚀 Master Server v8.0.0 Ready\n`);
   await fetchBulkSMSBalance();
   setInterval(fetchBulkSMSBalance, CONFIG.BALANCE_CHECK_INTERVAL);
 });
